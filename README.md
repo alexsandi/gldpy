@@ -14,6 +14,16 @@ GLD shapes can be symmetric or asymmetric  and have different combination of fin
 
 For more information, see the documentation.
 
+
+
+# Usage examples
+
+___
+
+https://github.com/alexsandi/using_gldpy
+
+
+
 # References
 
 _______
