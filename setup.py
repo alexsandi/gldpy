@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="gldpy", 
-    version="0.1",
+    version="0.2",
     author="Aleksandra Alekseeva",
     author_email="alex_sandi@mail.ru",
     description="Generalized Lambda Distribution for Python",
