@@ -968,8 +968,9 @@ class GLD:
         Resulting system of equations for 'RS' and 'FMKL' parameterizations are solved using numerical methods for given initial guess.
         
         For 'VSL' parameterization there is exact analytical solution of the equations.
-        In general case there are two different sets of parameters which give the same values of L-moments
-        and the best solution is chosen using GLD.GoF_Q_metric.
+        In general case there are two different sets of parameters which give the same values of L-moments.
+        The method returns solution which is closest to initial guess.
+        If initial_guess is None the best solution is chosen using GLD.GoF_Q_metric.  
 
         Parameters
         ----------
@@ -1011,7 +1012,8 @@ class GLD:
        
             
         """        
-        initial_guess = np.array(initial_guess)
+        if not initial_guess is None:
+            initial_guess = np.array(initial_guess)
         data = data.ravel()
         def sample_lm(data):
             """Calculate four sample L-moments and L-moment ratios."""            
@@ -1089,6 +1091,7 @@ class GLD:
             l1 = a1 + 1/l2*(1/(1+l4)/l4 - 1/(1+l3)/l3)+1/l2/l3 - 1/l2/l4
             param = np.array([l1,l2,l3,l4]).ravel()
         if self.param_type == 'VSL':
+            
             if a4**2+98*a4 +1 <0:
                 a4 = (-98+(98**2 - 4)**0.5)/2+10**(-10)
             p4 = np.array([(3+7*a4 + np.sqrt(a4**2+98*a4 +1))/(2*(1-a4)), (3+7*a4 - np.sqrt(a4**2+98*a4 +1))/(2*(1-a4))])
@@ -1100,11 +1103,19 @@ class GLD:
             p1 = a1+p2*(1-2*p3)/(p4+1)
             param1 = [p1[0], p2[0],p3[0],p4[0]]
             param2 = [p1[1], p2[1],p3[1],p4[1]]
-            best = [self.check_param(param1)*1,self.check_param(param2)*1]
-            if np.sum(best)==2:
-                GoF = [self.GoF_Q_metric(data,param1),self.GoF_Q_metric(data,param2)]
-                best = (GoF == np.min(GoF))*1
-            param = np.array([param1,param2][np.argmax(best)]).ravel()
+            if initial_guess is None:
+                best = [self.check_param(param1)*1,self.check_param(param2)*1]
+                if np.sum(best)==2:
+                    GoF = [self.GoF_Q_metric(data,param1),self.GoF_Q_metric(data,param2)]
+                    best = (GoF == np.min(GoF))*1
+                param = np.array([param1,param2][np.argmax(best)]).ravel()
+            else:
+                if initial_guess.ndim!=0 and len(initial_guess)!=1:
+                    raise ValueError('Specify initial guess for one parameter')
+                if np.abs(initial_guess - param1[3]) <= np.abs(initial_guess - param2[3]):
+                    param = np.array(param1)
+                else:
+                    param = np.array(param2)
         if disp_fit:  
             print('')
             print('Sample L-moments: ', sample_lm(data))
