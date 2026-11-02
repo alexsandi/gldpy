@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gldpy-gpu"
+version = "0.3.0"
+description = "Generalized Lambda Distribution for Python, with a PyTorch/CUDA backend"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Aleksandra Alekseeva", email = "alex_sandi@mail.ru" },
+    { name = "Kramer84" },
+]
+keywords = ["generalized lambda distribution", "GLD", "statistics", "pytorch", "gpu", "cuda"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "torch>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kramer84/gldpy-opt"
+Upstream = "https://github.com/alexsandi/gldpy"
+
+[dependency-groups]
+dev = ["pytest>=8", "build", "twine"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["gldpy_gpu"]
+
+[tool.hatch.build.targets.sdist]
+include = ["gldpy_gpu", "tests", "benchmarks", "README.md", "LICENSE", "pyproject.toml"]
+
+# --- uv: local development only (not published to PyPI) -------------------
+# GTX 1070 = Pascal, compute capability 6.1 (sm_61). Recent default PyTorch
+# wheels (CUDA 12.8+/13) no longer ship sm_61 kernels; the cu126 builds do.
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not gpu_speed'"
+markers = [
+    "gpu_speed: GPU-vs-CPU speed checks (run with `pytest -m gpu_speed`)",
+]

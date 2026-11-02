@@ -1,3 +1,54 @@
+# gldpy-gpu
+
+Fork of [gldpy](https://github.com/alexsandi/gldpy) (Aleksandra Alekseeva, MIT) that adds a PyTorch/CUDA backend, `gldpy.gpu`.
+The import name is `gldpy_gpu`, so it can be installed next to upstream `gldpy`.
+
+## Install
+
+```bash
+pip install gldpy-gpu          # or: uv add gldpy-gpu
+```
+
+PyTorch is a plain dependency (`torch>=2.0`): pip/uv picks the wheel for *your* machine, and
+modern GPUs work with the default build. Only Pascal GPUs (GTX 10xx, compute capability 6.1) need an
+older CUDA 12.6 build, because newer wheels dropped those kernels. If the installed torch can't run
+on your GPU, `gldpy_gpu.gpu.GLD` warns and falls back to CPU. Fix with:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+## GPU usage
+
+```python
+import torch
+from gldpy_gpu import gpu
+
+gld = gpu.GLD("FMKL")                 # uses CUDA when available, else CPU
+p = torch.tensor([0.0, 1.0, 0.2, 0.3], device=gld.device)
+x = gld.rand(p, size=10_000_000)       # sampling on the GPU
+params = gld.fit_LMM(x[:100_000])      # also fit_PM, fit_ML
+```
+
+The original NumPy/SciPy API is unchanged: `from gldpy_gpu import GLD`.
+
+Benchmarks: `uv run python benchmarks/bench_gpu.py`.
+
+## Speed (GTX 1070, torch 2.14.1+cu126, FMKL, best of runs)
+
+| Operation | N | CPU (NumPy) | GPU (float32) | Speedup |
+|---|---|---|---|---|
+| `Q` | 10 000 | 0.7 ms | 1.1 ms | 0.7x (launch overhead) |
+| `Q` | 1 000 000 | 116 ms | 1.5 ms | 77x |
+| `Q` | 10 000 000 | 1.63 s | 7.6 ms | 215x |
+| `CDF_num` | 10 000 | 5.6 s | 32 ms | 177x |
+| `CDF_num` | 100 000 | 49 s | 32 ms | ~1500x |
+| `fit_LMM` (100k samples) | VSL / RS / FMKL | 1.6 s / 1.3 s / 3.2 s | 6 ms / 311 ms / 386 ms | 271x / 4x / 8x |
+
+Small batches (below ~50k points) are faster on the CPU. float64 is 4-5x slower than float32 on this card.
+
+---
+
 # gldpy
 
 _______
