@@ -34,3 +34,12 @@ Verify with `torch.cuda.get_arch_list()` containing `sm_61`.
   equal to `[project].version` (a test enforces it).
 - Never commit/push/publish without being asked.
 - Keep upstream author credit and MIT license.
+
+## Working rules
+- Stay inside this folder. Files win over docs: if CLAUDE.md/README/ROADMAP disagree with the code, fix the doc.
+- Facts vs hypotheses: state verified values with their source file; label guesses.
+- `CODEBASE.md` is the file index; read it before exploring and update it when modules change.
+- Generated, do not edit: `uv.lock`, `dist/`, `.venv/`, `benchmarks/results/`.
+- Remote: `origin` = git@github.com:Kramer84/gldpy-opt.git. No secrets/`.env` in this repo.
+
+Last validated against the real files: 2026-11-04 (`uv run pytest`: 152 passed, 4 skipped).

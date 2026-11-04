@@ -23,8 +23,8 @@ Legend: [x] done, [ ] todo
 ## Phase 3 — Release as `gldpy-gpu`
 - [x] README: install section (torch/Pascal note), `gldpy.gpu` usage, upstream credit, conflict with `gldpy`
 - [x] `uv build`, `twine check`, wheel installs and runs on CUDA (name `gldpy-gpu` verified free on PyPI 2026-11-02)
-- [ ] Upload to TestPyPI, then PyPI (needs user's token; name availability check)
-- [ ] Tag `v0.3.0`
+- [x] Upload to PyPI (gldpy-gpu 0.3.0 live, verified 2026-11-04)
+- [x] Tag `v0.3.0` (pushed)
 
 - [x] Rename import package `gldpy` -> `gldpy_gpu` (coexists with upstream)
 - [x] Runtime check: torch build lacks kernels for GPU -> warn + CPU fallback
