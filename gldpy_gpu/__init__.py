@@ -1,34 +1,26 @@
 """
 Python package that implements tools for using Generalized Lambda Distribution (GLD) of three different parameterization types.
 
-For more information, see gldpy.GLD.
+For more information, see gldpy_gpu.GLD. `gldpy_gpu.gpu` has the PyTorch implementation.
 
 
 """
 import importlib
-from types import ModuleType
+from importlib import metadata
 from ._gld_module import GLD
 
-__version__ = "0.3.0"
+try:
+    __version__ = metadata.version("gldpy-gpu")  # pyproject.toml is the only place that sets it
+except metadata.PackageNotFoundError:  # running from a source tree that is not installed
+    __version__ = "0+unknown"
 
 __all__ = ["GLD", "gpu", "__version__"]
 
-def _load_gpu_submodule(package_name: str) -> ModuleType:
-    """Lazily import gldpy_gpu.gpu and verify PyTorch availability on first access."""
-    try:
-        import torch  # noqa: F401
-    except ImportError as exc:
-        raise ImportError(
-            "gldpy_gpu.gpu requires PyTorch. Install it via `pip install torch`."
-        ) from exc
-    return importlib.import_module(".gpu", package=package_name)
-
-
 def __getattr__(name: str):
-    """PEP 562 lazy attribute loader for `gldpy_gpu.gpu`."""
+    """PEP 562 lazy loader, so `import gldpy_gpu` does not pay for importing torch."""
     if name == "gpu":
-        gpu_mod = _load_gpu_submodule(__name__)
-        globals()["gpu"] = gpu_mod  # Cache in module namespace after first load
+        gpu_mod = importlib.import_module(".gpu", package=__name__)
+        globals()["gpu"] = gpu_mod
         return gpu_mod
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 

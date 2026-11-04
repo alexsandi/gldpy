@@ -1,51 +1,91 @@
 # gldpy-gpu
 
-Fork of [gldpy](https://github.com/alexsandi/gldpy) (Aleksandra Alekseeva, MIT) that adds a PyTorch/CUDA backend, `gldpy.gpu`.
-The import name is `gldpy_gpu`, so it can be installed next to upstream `gldpy`.
+The Generalized Lambda Distribution for Python, with an optional PyTorch/CUDA backend and accurate tail probabilities.
+
+This is a fork of [gldpy](https://github.com/alexsandi/gldpy) by Aleksandra Alekseeva (MIT). It corrects
+[14 defects of the original](docs/upstream-bugs.md) and adds the GPU backend. The import name is `gldpy_gpu`, so it can be
+installed next to `gldpy`.
+
+| Document | Content |
+|---|---|
+| [CHANGELOG.md](CHANGELOG.md) | All changes, including breaking ones |
+| [docs/upstream-bugs.md](docs/upstream-bugs.md) | Each defect of `gldpy` 0.2: cause, evidence, correction |
+| [docs/numerics.md](docs/numerics.md) | The numerical methods, and what limits them |
+| [docs/validation.md](docs/validation.md) | Fits against known distributions, tails, precision, known limitations |
+| [docs/benchmarks.md](docs/benchmarks.md) | Speed, what acts on it, and what a GPU gains |
 
 ## Install
 
 ```bash
-pip install gldpy-gpu          # or: uv add gldpy-gpu
+pip install gldpy-gpu            # NumPy/SciPy only
+pip install "gldpy-gpu[gpu]"     # adds PyTorch for the GPU backend
 ```
 
-PyTorch is a plain dependency (`torch>=2.0`): pip/uv picks the wheel for *your* machine, and
-modern GPUs work with the default build. Only Pascal GPUs (GTX 10xx, compute capability 6.1) need an
-older CUDA 12.6 build, because newer wheels dropped those kernels. If the installed torch can't run
-on your GPU, `gldpy_gpu.gpu.GLD` warns and falls back to CPU. Fix with:
+Pascal GPUs (GTX 10xx, compute capability 6.1) need a specific torch, because newer wheels dropped their kernels:
+`pip install torch --index-url https://download.pytorch.org/whl/cu126`. If the installed torch can't run on your GPU,
+`gpu.GLD` warns and uses torch on the CPU.
 
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu126
-```
-
-## GPU usage
+## Usage
 
 ```python
 import torch
 from gldpy_gpu import gpu
 
-gld = gpu.GLD("FMKL")                 # uses CUDA when available, else CPU
+gld = gpu.GLD("FMKL")                 # CUDA when available, else CPU
 p = torch.tensor([0.0, 1.0, 0.2, 0.3], device=gld.device)
-x = gld.rand(p, size=10_000_000)       # sampling on the GPU
-params = gld.fit_LMM(x[:100_000])      # also fit_PM, fit_ML
+x = gld.rand(p, size=10_000_000)      # sampling on the GPU
+params = gld.fit_LMM(x)               # also fit_PM, fit_ML
 ```
 
-The original NumPy/SciPy API is unchanged: `from gldpy_gpu import GLD`.
+The NumPy class has the same interface as upstream's, plus the tail methods: `from gldpy_gpu import GLD`. It also has
+`mean`, `var`, `skewness`, `kurtosis`, `fit_MM`, `fit_MPS`, `fit_starship`, `fit_curve`, `GoF_tests` and the plots, which the GPU class doesn't.
 
-Benchmarks: `uv run python benchmarks/bench_gpu.py`.
+**Without PyTorch**, `gpu.GLD` warns and runs on NumPy: the same calls work, and return ndarrays. `gpu.BACKEND` is `"torch"` or
+`"numpy"`. Arguments that only make sense for torch (`device`, `dtype`, `n_grid`, `refine_steps`, `lr`) are accepted and ignored, and
+fits use the slower SciPy optimizers.
 
-## Speed (GTX 1070, torch 2.14.1+cu126, FMKL, best of runs)
+## Tail probabilities
 
-| Operation | N | CPU (NumPy) | GPU (float32) | Speedup |
+Don't compute an upper tail as `1 - CDF_num(x)`, or as `Q(1 - s)`: `1 - s` rounds to 1 for small `s`.
+
+| Task | Call | Note |
+|---|---|---|
+| P(X <= x) | `CDF_num(x, p)` | relative accuracy in the lower tail |
+| P(X > x) | `SF_num(x, p)` | relative accuracy in the upper tail |
+| quantile at upper-tail probability `s` | `ISF(s, p)` | exact where `1 - s` rounds to 1 |
+| log density | `log_PDF_num(x, p)` | valid where `PDF_num` underflows to 0 |
+
+Infinite tails keep a relative accuracy of about 1e-14 in float64 and 1e-6 in float32, down to the smallest representable
+number. Bounded tails run out sooner, for a reason no solver can fix: `x` becomes indistinguishable from the end of the support.
+Measurements are in [docs/validation.md](docs/validation.md#4-tail-accuracy).
+
+## Precision
+
+Every method takes `dtype`, and computes in that precision only:
+
+```python
+gld.fit_LMM(data, dtype=torch.float64)    # or "float64"
+gpu.GLD("FMKL", dtype=torch.float64)      # a default for this instance
+```
+
+The order is: the method's `dtype`, then the constructor's, then the widest float dtype among tensor or NumPy inputs, then
+float32 for plain Python numbers. Results have that dtype. Fits are as good in float32 as in float64 (median difference in KS distance
+about 2e-8, over 54 fits of known distributions). Use float64 for bounded tails below about 1e-6, or when the data have a large offset relative to their spread.
+
+## Speed
+
+GTX 1070, FMKL, float32, median. CUDA loses below about 1e5 points because each operation pays a launch cost, and it wins by a growing margin above that:
+
+| Operation | N | NumPy | torch on CPU | CUDA |
 |---|---|---|---|---|
-| `Q` | 10 000 | 0.7 ms | 1.1 ms | 0.7x (launch overhead) |
-| `Q` | 1 000 000 | 116 ms | 1.5 ms | 77x |
-| `Q` | 10 000 000 | 1.63 s | 7.6 ms | 215x |
-| `CDF_num` | 10 000 | 5.6 s | 32 ms | 177x |
-| `CDF_num` | 100 000 | 49 s | 32 ms | ~1500x |
-| `fit_LMM` (100k samples) | VSL / RS / FMKL | 1.6 s / 1.3 s / 3.2 s | 6 ms / 311 ms / 386 ms | 271x / 4x / 8x |
+| `Q` | 1e4 | 0.6 ms | 0.5 ms | 0.8 ms |
+| `Q` | 1e7 | 1.8 s | 237 ms | 6.1 ms |
+| `rand` | 1e7 | 2.1 s | 377 ms | 9.6 ms |
+| `CDF_num` | 1e5 | 29 s | 16 ms | 7.8 ms |
+| `CDF_num` | 1e7 | not run | 2.4 s | 86 ms |
+| `fit_LMM` | 1e7 | not run | 2.4 s | 118 ms |
 
-Small batches (below ~50k points) are faster on the CPU. float64 is 4-5x slower than float32 on this card.
+[docs/benchmarks.md](docs/benchmarks.md) explains the method and what acts on speed.
 
 ---
 

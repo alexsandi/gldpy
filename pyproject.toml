@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gldpy-gpu"
-version = "0.3.0"
+version = "0.4.0"
 description = "Generalized Lambda Distribution for Python, with a PyTorch/CUDA backend"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,21 +24,29 @@ dependencies = [
     "numpy",
     "scipy",
     "matplotlib",
-    "torch>=2.0",
 ]
 
+[project.optional-dependencies]
+gpu = ["torch>=2.0"]
+
 [project.urls]
-Homepage = "https://github.com/Kramer84/gldpy-opt"
+Homepage = "https://github.com/Kramer84/gldpy-gpu"
 Upstream = "https://github.com/alexsandi/gldpy"
 
 [dependency-groups]
-dev = ["pytest>=8", "build", "twine", "gldpy==0.2"]
+dev = [
+    "pytest>=8",
+    "build",
+    "twine",
+    "torch>=2.0",
+    "gldpy==0.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["gldpy_gpu"]
 
 [tool.hatch.build.targets.sdist]
-include = ["gldpy_gpu", "tests", "benchmarks", "README.md", "LICENSE", "pyproject.toml"]
+include = ["gldpy_gpu", "tests", "benchmarks", "docs", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 # --- uv: local development only (not published to PyPI) -------------------
 # GTX 1070 = Pascal, compute capability 6.1 (sm_61). Recent default PyTorch

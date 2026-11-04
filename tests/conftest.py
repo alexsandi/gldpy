@@ -1,7 +1,14 @@
+import importlib.util
+
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
+# Without torch, only the NumPy-side tests can run (see test_optional_torch.py).
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+collect_ignore_glob = [] if HAS_TORCH else ["test_gpu_*.py", "test_speed.py", "test_analytic.py"]
+torch = None
+if HAS_TORCH:
+    import torch
 
 # Valid, representative parameters for each parameterization.
 PARAMS = {
@@ -13,7 +20,7 @@ PARAMS = {
 
 def _devices():
     devs = ["cpu"]
-    if torch.cuda.is_available():
+    if HAS_TORCH and torch.cuda.is_available():
         devs.append("cuda")
     return devs
 
