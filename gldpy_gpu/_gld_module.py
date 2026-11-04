@@ -2,7 +2,82 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import optimize, special, stats
+from scipy import integrate, optimize, special, stats
+
+# y = exp(-700) ~ 1e-304, just above where float64 underflows.
+_LOGIT_BOUND = 700.0
+# Below this |lambda| the FMKL/VSL moment sums, which divide by lambda**k, lose too many digits.
+_MOMENT_SERIES_MIN_LAMBDA = 0.02
+
+
+def _pow_minus_one(log_u, lam):
+    """u**lam - 1 from log(u). RS uses y**a - s**b = (y**a - 1) - (s**b - 1), which avoids subtracting two numbers near 1."""
+    return 0.0 if lam == 0 else np.expm1(lam * log_u)
+
+
+def _box_cox(log_u, lam):
+    """(u**lam - 1) / lam from log(u), without cancellation as lam -> 0."""
+    return log_u if lam == 0 else np.expm1(lam * log_u) / lam
+
+
+def _quantile_from_logs(log_y, log_s, param, param_type):
+    """Q from log(y) and log(s), where s = 1 - y, so neither tail ever forms `1 - y`."""
+    p1, p2, p3, p4 = param
+    with np.errstate(over="ignore"):
+        if param_type == "RS":
+            return p1 + (_pow_minus_one(log_y, p3) - _pow_minus_one(log_s, p4)) / p2
+        if param_type == "FMKL":
+            return p1 + (_box_cox(log_y, p3) - _box_cox(log_s, p4)) / p2
+        # delta = 0 or 1 removes a term entirely, also where its box-cox value is infinite.
+        lower = 0.0 if p3 == 1 else (1.0 - p3) * _box_cox(log_y, p4)
+        upper = 0.0 if p3 == 0 else p3 * _box_cox(log_s, p4)
+        return p1 + p2 * (lower - upper)
+
+
+def _log_density_from_logs(log_y, log_s, param, param_type):
+    """log f(y) = -log Q'(y), factoring out the larger term of Q' so nothing overflows."""
+    p1, p2, p3, p4 = param
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        if param_type == "VSL":
+            c3, c4, e3, e4, log_scale = 1.0 - p3, p3, p4 - 1.0, p4 - 1.0, -np.log(p2)
+        elif param_type == "FMKL":
+            c3, c4, e3, e4, log_scale = 1.0, 1.0, p3 - 1.0, p4 - 1.0, np.log(p2)
+        else:
+            c3, c4, e3, e4, log_scale = p3, p4, p3 - 1.0, p4 - 1.0, np.log(abs(p2))
+        a = -np.inf if c3 == 0 else np.log(abs(c3)) + (0.0 if e3 == 0 else e3 * log_y)
+        b = -np.inf if c4 == 0 else np.log(abs(c4)) + (0.0 if e4 == 0 else e4 * log_s)
+        m = np.maximum(a, b)
+        ok = np.isfinite(m)  # at y = 0 or 1 a term is infinite and the larger one alone decides
+        a, b, m0 = np.where(ok, a, 0.0), np.where(ok, b, 0.0), np.where(ok, m, 0.0)
+        inner = np.log(np.abs(np.sign(c3) * np.exp(a - m0) + np.sign(c4) * np.exp(b - m0)))
+        return log_scale - m - np.where(ok, inner, 0.0)
+
+
+def _density_from_y(y, param, param_type):
+    """f(y) = scale / |c3 y**e3 + c4 (1 - y)**e4|. A term with a zero coefficient is left out, also at y = 0 or 1."""
+    p1, p2, p3, p4 = param
+    if param_type == "VSL":
+        c3, c4, e3, e4, scale = 1.0 - p3, p3, p4 - 1.0, p4 - 1.0, 1.0 / p2
+    elif param_type == "FMKL":
+        c3, c4, e3, e4, scale = 1.0, 1.0, p3 - 1.0, p4 - 1.0, p2
+    else:
+        c3, c4, e3, e4, scale = p3, p4, p3 - 1.0, p4 - 1.0, abs(p2)
+    with np.errstate(divide="ignore", over="ignore"):
+        term3 = 0.0 if c3 == 0 else c3 * y**e3
+        term4 = 0.0 if c4 == 0 else c4 * (1.0 - y) ** e4
+        return scale / np.abs(term3 + term4)
+
+
+def _fmkl_lm_terms(l):
+    """FMKL L-moment terms in closed form: (-1/(1+l) + 2/(2+l)) / l = 1/((1+l)(2+l)), and so on.
+
+    The 1/l of the textbook sums cancels, so these stay finite and accurate at l = 0.
+    """
+    g2 = 1 / ((1 + l) * (2 + l))
+    g3 = (l - 1) * g2 / (3 + l)
+    g4 = (l - 1) * (l - 2) * g2 / ((3 + l) * (4 + l))
+    return g2, g3, g4
+
 
 class GLD:
     r"""Univariate Generalized Lambda Distribution class.
@@ -31,7 +106,7 @@ class GLD:
             Q(y) = \lambda_1 + \frac{y^{\lambda_3} - (1-y)^{\lambda_4}}{\lambda_2},
         
         .. math::     
-            f(y) = \frac{\lambda_2}{\lambda_3 y^{\lambda_3-1} - \lambda_4 (1-y)^{\lambda_4-1}},
+            f(y) = \frac{\lambda_2}{\lambda_3 y^{\lambda_3-1} + \lambda_4 (1-y)^{\lambda_4-1}},
             
         where :math:`\lambda_1` - location parameter, :math:`\lambda_2` - inverse scale parameter,
         :math:`\lambda_3, \lambda_4` - shape parameters.
@@ -47,7 +122,7 @@ class GLD:
             Q(y) = \lambda_1 + \frac{(y^{\lambda_3}-1)/\lambda_3 - ((1-y)^{\lambda_4}-1)/\lambda_4}{\lambda_2},
         
         .. math::     
-            f(y) = \frac{\lambda_2}{y^{\lambda_3-1} - (1-y)^{\lambda_4-1}}.       
+            f(y) = \frac{\lambda_2}{y^{\lambda_3-1} + (1-y)^{\lambda_4-1}}.       
         
         'VSL' parameterization was introduced for simple parameter estimating in closed form using L-moments. Its quantile function :math:`Q(y)` and  density quantile function :math:`f(y)` are:
          
@@ -150,23 +225,44 @@ class GLD:
             
         """
         y = np.array(y).astype(float)
-        param = np.array(param)
+        param = np.asarray(param, dtype=float)
         if np.logical_or(y>1, y<0).any(): 
             raise ValueError('y should be in range [0,1]')
         if not self.check_param(param):
             raise ValueError('Parameters are not valid')
-        if self.param_type == 'RS':
-            return param[0] + (y**param[2] - (1-y)**param[3])/param[1]        
-        if self.param_type == 'FMKL':
-            f1 = (y**param[2]-1)/param[2] if param[2]!=0 else np.log(y)
-            f2 = ((1-y)**param[3] - 1)/param[3] if param[3]!=0 else np.log(1-y)
-            return param[0] + (f1 - f2)/param[1]        
-        if self.param_type == 'VSL':
-            if param[3]!=0:
-                return param[0] + ((1 - param[2])*(y**param[3] - 1)/param[3] - param[2]*((1-y)**param[3] - 1)/param[3])*param[1]
-            else:
-                return param[0] + param[1]*np.log(y**(1-param[2])/(1-y)**param[2])
-        
+        with np.errstate(divide='ignore'):
+            return _quantile_from_logs(np.log(y), np.log1p(-y), param, self.param_type)
+
+    def ISF(self, s, param):
+        """Calculate quantile function at upper tail probability `s`, that is Q(1 - s).
+
+        Unlike Q(1 - s) it stays accurate for tiny `s`, where `1 - s` would round to 1.
+
+        Parameters
+        ----------
+        s : array-like
+            Upper tail probability, must be between 0 and 1.
+        param : array-like
+            Parameters of GLD.
+        Raises
+        ------
+        ValueError
+            If input parameters are not valid.
+        Returns
+        -------
+        array-like
+            Value of quantile function evaluated at `1 - s`.
+
+        """
+        s = np.array(s).astype(float)
+        param = np.asarray(param, dtype=float)
+        if np.logical_or(s>1, s<0).any():
+            raise ValueError('s should be in range [0,1]')
+        if not self.check_param(param):
+            raise ValueError('Parameters are not valid')
+        with np.errstate(divide='ignore'):
+            return _quantile_from_logs(np.log1p(-s), np.log(s), param, self.param_type)
+
     def PDF_Q(self, y, param):
         """Calculate density quantile function of GLD at `y` for given parameters.
  
@@ -191,14 +287,41 @@ class GLD:
             raise ValueError('y should be in range [0,1]')
         if not self.check_param(param):
             raise ValueError('Parameters are not valid')        
-        if self.param_type == 'RS':
-            return  param[1]/((param[2]*y**(param[2]-1) + param[3]*(1-y)**(param[3]-1)))
-        if self.param_type == 'FMKL':
-            return param[1]/((y**(param[2]-1) + (1-y)**(param[3]-1)))
-        if self.param_type == 'VSL':
-            return 1/((1 - param[2])*y**(param[3] - 1) + param[2]*(1-y)**(param[3] - 1))/param[1]
+        return _density_from_y(y, np.asarray(param, dtype=float), self.param_type)
        
-    def CDF_num(self, x, param, xtol = 1e-05):
+    def _logit_cdf(self, x, param, xtol):
+        """Solve Q(sigmoid(t)) = x for each element.
+
+        Working on t = logit(y) makes `xtol` a relative tolerance on the smaller of y and 1 - y.
+        Returns -inf/+inf at or beyond the support, NaN for NaN input, and saturates at
+        t = +-_LOGIT_BOUND, i.e. tail probabilities below ~1e-304.
+        """
+        if not self.check_param(param):
+            raise ValueError('Parameters are not valid')
+        param = np.asarray(param, dtype=float)
+        x = np.array(x, dtype=float)
+        if x.ndim == 0:
+            x = x.reshape(1)
+        a, b = self.supp(param)
+        t = np.full(x.shape, np.nan)
+        t[x <= a] = -np.inf
+        t[x >= b] = np.inf
+
+        def f(t_i, x_i):
+            """Auxiliary function for root finding."""
+            return _quantile_from_logs(-np.logaddexp(0.0, -t_i), -np.logaddexp(0.0, t_i), param, self.param_type) - x_i
+
+        for i in np.ndindex(x.shape):
+            if np.isnan(t[i]) and not np.isnan(x[i]):
+                if f(-_LOGIT_BOUND, x[i]) >= 0:
+                    t[i] = -_LOGIT_BOUND
+                elif f(_LOGIT_BOUND, x[i]) <= 0:
+                    t[i] = _LOGIT_BOUND
+                else:
+                    t[i] = optimize.brentq(f, -_LOGIT_BOUND, _LOGIT_BOUND, args=(x[i],), xtol=xtol, maxiter=500)
+        return t
+
+    def CDF_num(self, x, param, xtol = 1e-08):
         """Calculate cumulative distribution function of GLD numerically at `x` for given parameters.
 
         Parameters
@@ -208,7 +331,7 @@ class GLD:
         param : array-like
             Parameters of GLD.
         xtol : float, optional
-            Absolute error parameter for optimization procedure. The default is 1e-05.
+            Relative accuracy of the smaller tail probability. The default is 1e-08.
         Raises
         ------
         ValueError
@@ -216,26 +339,67 @@ class GLD:
         Returns
         -------
         array-like
-            Value of cumulative distribution function evaluated at `x`.
+            Value of cumulative distribution function evaluated at `x`, with the shape of `x`
+            (a scalar gives an array of length 1).
 
         """
-        if not self.check_param(param):
-            raise ValueError('Parameters are not valid')
-        x = np.array([x]).ravel()
-        ans = x*np.nan
-        a,b = self.supp(param)
-        ans[x<a] = 0
-        ans[x>b] = 1
-        def for_calc_F(y):
-            """Auxiliary function for optimization."""  
-            return (self.Q(y,param) - x_arg)**2
-        ind = np.nonzero(np.isnan(ans))[0]
-        for i in ind:
-            x_arg = x[i]
-            ans[i] = optimize.fminbound(for_calc_F,0,1, xtol = xtol)
-        return ans
-    
-    def PDF_num(self, x, param, xtol = 1e-05):
+        return np.exp(-np.logaddexp(0.0, -self._logit_cdf(x, param, xtol)))
+
+    def SF_num(self, x, param, xtol = 1e-08):
+        """Calculate survival function P(X > x) numerically at `x` for given parameters.
+
+        Use it for upper tails: `1 - CDF_num` loses everything below machine epsilon.
+
+        Parameters
+        ----------
+        x : array-like
+            Argument of the survival function.
+        param : array-like
+            Parameters of GLD.
+        xtol : float, optional
+            Relative accuracy of the smaller tail probability. The default is 1e-08.
+        Raises
+        ------
+        ValueError
+            If input parameters are not valid.
+        Returns
+        -------
+        array-like
+            Value of the survival function evaluated at `x`, with the shape of `x`
+            (a scalar gives an array of length 1).
+
+        """
+        return np.exp(-np.logaddexp(0.0, self._logit_cdf(x, param, xtol)))
+
+    def log_PDF_num(self, x, param, xtol = 1e-08):
+        """Calculate the logarithm of the probability density function numerically at `x`.
+
+        Parameters
+        ----------
+        x : array-like
+            Argument of PDF.
+        param : array-like
+            Parameters of GLD.
+        xtol : float, optional
+            Relative accuracy of the smaller tail probability. The default is 1e-08.
+        Raises
+        ------
+        ValueError
+            If input parameters are not valid.
+        Returns
+        -------
+        array-like
+            Log density evaluated at `x`, -inf outside the support, with the shape of `x`
+            (a scalar gives an array of length 1).
+
+        """
+        t = self._logit_cdf(x, param, xtol)
+        a, b = self.supp(param)
+        x = np.array(x, dtype=float).reshape(t.shape)
+        ans = _log_density_from_logs(-np.logaddexp(0.0, -t), -np.logaddexp(0.0, t), np.asarray(param, dtype=float), self.param_type)
+        return np.where(np.logical_or(x<a, x>b), -np.inf, ans)
+
+    def PDF_num(self, x, param, xtol = 1e-08):
         """Calculate probability density function of GLD numerically at `x` for given parameters.
 
         Parameters
@@ -245,7 +409,7 @@ class GLD:
         param : array-like
             Parameters of GLD.
         xtol : float, optional
-            Absolute error parameter for optimization procedure. The default is 1e-05.
+            Relative accuracy of the smaller tail probability. The default is 1e-08.
         Raises
         ------
         ValueError
@@ -253,15 +417,12 @@ class GLD:
         Returns
         -------
         array-like
-            Value of probability density function evaluated at `x`.
-            
+            Value of probability density function evaluated at `x`, with the shape of `x`
+            (a scalar gives an array of length 1).
+
         """
-        y = self.CDF_num(x, param, xtol)
-        ans = self.PDF_Q(y,param)
-        a,b = self.supp(param)
-        ans[np.logical_or(x<a, x>b)] = 0
-        return ans
-    
+        return np.exp(self.log_PDF_num(x, param, xtol))
+
     def supp(self,param):
         """Return support of GLD for given parameters.
 
@@ -300,9 +461,8 @@ class GLD:
             Sample of GLD random variables of given size.
 
         """
-        if random_state:
-            np.random.seed(random_state)
-        alpha = np.random.random(size)
+        generator = np.random if random_state is None else np.random.RandomState(random_state)
+        alpha = generator.random_sample(size)
         return self.Q(alpha,param)        
     
     def correct_supp(self,  data, param, eps = 0.0001):
@@ -328,18 +488,16 @@ class GLD:
             
         """
         data = data.ravel()
-        def fun_opt(x):
-            """Auxiliary function for optimization."""            
-            A = np.min([np.min(data), self.Q(eps,param)])
-            B = np.max([np.max(data), self.Q(1-eps,param)])
-            par = np.hstack([x,param[2:]])
-            if not self.check_param(par):
-                return np.inf
-            return np.max([np.abs(self.Q(eps,par) - A),    np.abs(self.Q(1-eps,par) - B)])
-        x = optimize.fmin(fun_opt,param[:2], disp=False)
-        param[:2] = x
-        return param     
-        
+        param = np.array(param, dtype=float)
+        q_low, q_high = self.Q(eps,param), self.Q(1-eps,param)
+        A = np.min([np.min(data), q_low])
+        B = np.max([np.max(data), q_high])
+        # Q is affine in location and scale, so the two end conditions have an exact solution.
+        k = (B - A)/(q_high - q_low)
+        param[1] = param[1]*k if self.param_type == 'VSL' else param[1]/k
+        param[0] = A - (q_low - param[0])*k
+        return param
+
     def GoF_Q_metric(self,data,param):
         """Calculate Goodness-of-Fit metric based on discrepancy between empirical and theoretical quantile functions.
         
@@ -385,7 +543,9 @@ class GLD:
             """Auxiliary function for GoF test."""            
             return self.CDF_num(x,param)
         ks = stats.kstest(data, cdf)
-        chi2 = stats.chisquare(np.histogram(data,self.Q(np.linspace(0, 1, bins_gof + 1),param))[0],[len(data)/bins_gof]*bins_gof )
+        # Points outside the support go to the end bins, or the counts would not sum to len(data).
+        a,b = self.supp(param)
+        chi2 = stats.chisquare(np.histogram(np.clip(data,a,b),self.Q(np.linspace(0, 1, bins_gof + 1),param))[0],[len(data)/bins_gof]*bins_gof )
         return ks, chi2
 
     def plot_cdf(self, param_list, data = None, ymin = 0.01, ymax = 0.99, n_points = 100, names = None, color_emp = 'lightgrey', colors = None):
@@ -530,6 +690,16 @@ class GLD:
         s = 0
         p3 = np.array(p3)
         p4 = np.array(p4)
+        smallest = {'RS': np.inf, 'FMKL': min(abs(p3), abs(p4)), 'VSL': abs(p4)}[self.param_type]
+        if smallest < _MOMENT_SERIES_MIN_LAMBDA:
+            # The sums below divide by lambda**k. Integrate Q(y)**k directly, in both halves
+            # because the integrand has a log singularity at each end.
+            standard = np.array([0.0, 1.0, float(p3), float(p4)])
+            def integrand(y):
+                """Auxiliary function for moments calculation."""
+                return _quantile_from_logs(np.log(y), np.log1p(-y), standard, self.param_type)**k
+            return (integrate.quad(integrand, 0, 0.5, limit=200, epsabs=1e-11, epsrel=1e-11)[0]
+                    + integrate.quad(integrand, 0.5, 1, limit=200, epsabs=1e-11, epsrel=1e-11)[0])
         if self.param_type == 'RS':
             for i in range(0,k+1):
                 s+=special.binom(k,i)*(-1)**i *special.beta(p3*(k-i)+1, p4*i+1)
@@ -887,7 +1057,7 @@ class GLD:
                 """Auxiliary function for optimization."""                
                 l3 = x[0]
                 l4 = x[1]
-                return np.max([( (0.75**l3 - 0.25**l4 - 0.25**l3 +0.75**l4)/((1-u)**l3-u**l4 - u**l3+(1-u)**l4) - a4),
+                return np.max([np.abs((0.75**l3 - 0.25**l4 - 0.25**l3 +0.75**l4)/((1-u)**l3-u**l4 - u**l3+(1-u)**l4) - a4),
                                np.abs((0.5**l3 - 0.5**l4 - u**l3 +(1-u)**l4)/((1-u)**l3 - u**l4 - 0.5**l3 +0.5**l4) - a3)])
             if initial_guess.ndim==0 or len(initial_guess)!=2:
                 raise ValueError('Specify initial guess for two parameters')  
@@ -897,47 +1067,55 @@ class GLD:
             param = np.array([l1,l2,l3,l4]).ravel()
             theor_stat = theor_statistics(param,u)    
         if self.param_type == 'FMKL':
+            def h(c,l):
+                """(c**l - 1)/l, finite at l = 0."""
+                return _box_cox(np.log(c),l)
+            def ratios(l3,l4,u):
+                """Third and fourth percentile-based statistics, which do not depend on location and scale."""
+                p3 = (h(0.5,l3) - h(u,l3) + h(1-u,l4) - h(0.5,l4)) / (h(1-u,l3) - h(0.5,l3) + h(0.5,l4) - h(u,l4))
+                p4 = (h(0.75,l3) - h(0.25,l3) + h(0.75,l4) - h(0.25,l4)) / (h(1-u,l3) - h(u,l3) + h(1-u,l4) - h(u,l4))
+                return p3,p4
             def theor_statistics(param,u):
                 """Calculate four GLD percentile-based statistics."""                
                 [l1,l2,l3,l4] = param
-                p1 = l1+((0.5**l3-1)/l3 - (0.5**l4-1)/l4)/l2
-                p2 = (((1-u)**l3 - u**l3)/l3 +((1-u)**l4- u**l4)/l4)/l2
-                p3 = ((0.5**l3  - u**l3 )/l3  +((1-u)**l4- 0.5**l4)/l4) / (((1-u)**l3 - 0.5**l3)/l3  +(0.5**l4- u**l4)/l4)
-                p4 = ((0.75**l3  - 0.25**l3 )/l3  +(0.75**l4- 0.25**l4)/l4)/(((1-u)**l3  - u**l3)/l3 + ((1-u)**l4- u**l4)/l4)
+                p1 = l1+(h(0.5,l3) - h(0.5,l4))/l2
+                p2 = (h(1-u,l3) - h(u,l3) + h(1-u,l4) - h(u,l4))/l2
+                p3,p4 = ratios(l3,l4,u)
                 return p1,p2,p3,p4
             
             def fun_opt(x):                
                 """Auxiliary function for optimization."""
-                l3 = x[0]
-                l4 = x[1]
-                return np.max([np.abs(((0.75**l3  - 0.25**l3 )/l3  +(0.75**l4- 0.25**l4)/l4)/(((1-u)**l3  - u**l3)/l3 + ((1-u)**l4- u**l4)/l4) - a4),
-                                 np.abs(((0.5**l3  - u**l3 )/l3  +((1-u)**l4- 0.5**l4)/l4) / (((1-u)**l3 - 0.5**l3)/l3  +(0.5**l4- u**l4)/l4) - a3)])
+                p3,p4 = ratios(x[0],x[1],u)
+                return np.max([np.abs(p4 - a4), np.abs(p3 - a3)])
             if initial_guess.ndim==0 or len(initial_guess)!=2:
                 raise ValueError('Specify initial guess for two parameters')   
             [l3,l4] = optimize.fmin(fun_opt,initial_guess,maxfun = maxfun,xtol=xtol, maxiter=maxiter, disp = disp_optimizer)
-            l2 = 1/a2*(((1-u)**l3-u**l3)/l3 + ((1-u)**l4 - u**l4)/l4)
-            l1 = a1 - 1/l2*((0.5**l3 - 1)/l3 - (0.5**l4 - 1)/l4)
+            l2 = 1/a2*(h(1-u,l3) - h(u,l3) + h(1-u,l4) - h(u,l4))
+            l1 = a1 - 1/l2*(h(0.5,l3) - h(0.5,l4))
             param = np.array([l1,l2,l3,l4]).ravel()
             theor_stat = theor_statistics(param,u)   
         if self.param_type == 'VSL':
+            def h(c,l):
+                """(c**l - 1)/l, finite at l = 0."""
+                return _box_cox(np.log(c),l)
             def theor_statistics(param,u):
                 """Calculate four GLD percentile-based statistics."""                
                 [a,b,d,l] = param
-                p1 = a+b*(0.5**l - 1)*(1-2*d)/l
-                p2 = b*((1-u)**l - u**l)/l
-                p3 = ((1-d)*(0.5**l - u**l)+d*((1-u)**l - 0.5**l))/((1-d)*((1-u)**l - 0.5**l)+d*(0.5**l - u**l))
-                p4 = (0.75**l - 0.25**l)/((1-u)**l - u**l)
+                p1 = a+b*h(0.5,l)*(1-2*d)
+                p2 = b*(h(1-u,l) - h(u,l))
+                p3 = ((1-d)*(h(0.5,l) - h(u,l))+d*(h(1-u,l) - h(0.5,l)))/((1-d)*(h(1-u,l) - h(0.5,l))+d*(h(0.5,l) - h(u,l)))
+                p4 = (h(0.75,l) - h(0.25,l))/(h(1-u,l) - h(u,l))
                 return p1,p2,p3,p4
             def fun_opt(x):
                 """Auxiliary function for optimization."""                
-                return np.abs((0.75**x - 0.25**x)/((1-u)**x - u**x) - a4)
+                return np.abs((h(0.75,x[0]) - h(0.25,x[0]))/(h(1-u,x[0]) - h(u,x[0])) - a4)
             if initial_guess.ndim!=0 and len(initial_guess)!=1:
                 raise ValueError('Specify initial guess for one parameter')
-            l = optimize.fmin(fun_opt,initial_guess,maxfun = maxfun,xtol=xtol, maxiter=maxiter, disp = disp_optimizer)[0]
-            d = (a3*((1-u)**l - 0.5**l) - 0.5**l +u**l)/(a3+1)/((1-u)**l - 2*0.5**l+u**l)
+            l = optimize.fmin(fun_opt,np.atleast_1d(initial_guess),maxfun = maxfun,xtol=xtol, maxiter=maxiter, disp = disp_optimizer)[0]
+            d = (a3*(h(1-u,l) - h(0.5,l)) - h(0.5,l) + h(u,l))/(a3+1)/(h(1-u,l) - 2*h(0.5,l) + h(u,l))
             d = np.max([0,np.min([1,d])])
-            b = a2*l/((1-u)**l - u**l)
-            a = a1 - b*(0.5**l - 1)*(1-2*d)/l
+            b = a2/(h(1-u,l) - h(u,l))
+            a = a1 - b*h(0.5,l)*(1-2*d)
             param = np.array([a,b,d,l]).ravel()
             theor_stat = theor_statistics(param,u)
         if disp_fit:  
@@ -1051,14 +1229,10 @@ class GLD:
                     return s
                 if self.param_type=='FMKL':
                     [l1,l2,l3,l4] = param
-                    s = 0
-                    for k in range(r):
-                        s+=(-1)**(r-k-1)*special.binom(r-1,k)*special.binom(r+k-1,k)*(1/(l3+k+1)/l3 - (-1)**(r-1)/(l4+k+1)/l4)
                     if r==1:
-                        s = s/l2+l1 - 1/l2/l3 +1/l2/l4
-                    else:
-                        s = s/l2
-                    return s
+                        return l1 + (1/(1+l4) - 1/(1+l3))/l2
+                    terms3, terms4 = _fmkl_lm_terms(l3), _fmkl_lm_terms(l4)
+                    return (terms3[r-2] - (-1)**(r-1)*terms4[r-2])/l2
             l1 = lr(1,param)
             l2 = lr(2,param)
             l3 = lr(3,param)
@@ -1080,15 +1254,15 @@ class GLD:
         if self.param_type == 'FMKL':
             def fun_opt(x):
                 """Auxiliary function for optimization."""                
-                [l3, l4] = x
-                L2 = -1/(1+l3)/l3+2/(2+l3)/l3-1/(1+l4)/l4+2/(2+l4)/l4
-                return np.max([np.abs((1/(l3+1)/l3 - 6/(2+l3)/l3 + 6/(3+l3)/l3 - 1/(l4+1)/l4 + 6/(2+l4)/l4 - 6/(3+l4)/l4)/L2 - a3),
-                               np.abs((-1/(1+l3)/l3 + 12/(2+l3)/l3 - 30/(3+l3)/l3 + 20/(4+l3)/l3-1/(1+l4)/l4 + 12/(2+l4)/l4 - 30/(3+l4)/l4 + 20/(4+l4)/l4)/L2 - a4)])
+                g2_3, g3_3, g4_3 = _fmkl_lm_terms(x[0])
+                g2_4, g3_4, g4_4 = _fmkl_lm_terms(x[1])
+                L2 = g2_3 + g2_4
+                return np.max([np.abs((g3_3 - g3_4)/L2 - a3), np.abs((g4_3 + g4_4)/L2 - a4)])
             if initial_guess is None or initial_guess.ndim==0 or len(initial_guess)!=2:
                 raise ValueError('Specify initial guess for two parameters')  
             [l3,l4] = optimize.fmin(fun_opt,initial_guess,maxfun = maxfun,xtol=xtol, maxiter=maxiter, disp = disp_optimizer)
-            l2 = (-1/(1+l3)/l3+2/(2+l3)/l3-1/(1+l4)/l4+2/(2+l4)/l4)/a2
-            l1 = a1 + 1/l2*(1/(1+l4)/l4 - 1/(1+l3)/l3)+1/l2/l3 - 1/l2/l4
+            l2 = (_fmkl_lm_terms(l3)[0] + _fmkl_lm_terms(l4)[0])/a2
+            l1 = a1 + 1/l2*(1/(1+l3) - 1/(1+l4))
             param = np.array([l1,l2,l3,l4]).ravel()
         if self.param_type == 'VSL':
             
@@ -1189,6 +1363,8 @@ class GLD:
         ind = np.unravel_index(np.argmin(res, axis=None), res.shape)
         p3,p4 = p3_list[ind[0]], p4_list[ind[1]]
         param = np.hstack([np.mean(data),1,p3,p4])
+        if self.param_type == 'RS' and not self.check_param(param):
+            param[1] = -1
         x = optimize.fmin(fun_opt_supp,param[:2], disp=False, xtol = 10**(-8))
         return np.hstack([x,p3,p4])
     
@@ -1267,12 +1443,19 @@ class GLD:
         delta = np.min(np.diff(unique))/2
         ind = np.nonzero(counts>1)[0]
         ind1 = np.nonzero(np.isin(data, unique[ind]))[0]
-        data[ind1] = data[ind1] + stats.norm.rvs(0,delta/3,len(ind1))
+        # A fixed seed, so that fitting the same data twice gives the same result.
+        data[ind1] = data[ind1] + stats.norm.rvs(0,delta/3,len(ind1),random_state=np.random.RandomState(0))
         def S(param):
             """Spacing function for optimization."""            
             if not self.check_param(param):
                 return np.inf
-            return -np.mean(np.log(np.abs(np.diff(self.CDF_num(np.sort((data)),param)))))
+            # All n + 1 spacings, with F = 0 before the first point and F = 1 after the last.
+            # Without the two end spacings a point outside the support is not penalized.
+            sorted_data = np.sort(data)
+            u = self.CDF_num(sorted_data,param)
+            spacings = np.hstack([u[0], np.diff(u), self.SF_num(sorted_data[-1],param)])
+            with np.errstate(divide='ignore'):
+                return -np.mean(np.log(np.abs(spacings)))
         if method not in ['MM','LMM','PM','grid']:
                 raise ValueError('Unknown method \'%s\' . Use \'MM\',\'LMM\' , \'PM\' or \'grid\'' %method)
         if method=='MM':
@@ -1477,7 +1660,8 @@ class GLD:
             if not self.check_param(param):
                 return np.inf
             u = self.CDF_num(data, param)
-            return -len(data) - 1/len(data)*np.sum((np.arange(1,len(data)+1)*2 - 1)*(np.log(u) + np.log(1 - u[::-1])))
+            sf = self.SF_num(data, param)
+            return -len(data) - 1/len(data)*np.sum((np.arange(1,len(data)+1)*2 - 1)*(np.log(u) + np.log(sf[::-1])))
         if method not in ['MM','LMM','PM','grid']:
                 raise ValueError('Unknown method \'%s\' . Use \'MM\',\'LMM\' , \'PM\' or \'grid\'' %method)
         if method=='MM':
@@ -1498,8 +1682,8 @@ class GLD:
             print('Initial point for Starship Method: ', param1)
             print('Estimated by ', method)
             print('')
-            print('Initial KS-statistic: ', fun_opt(param1))
-            print('Optimized KS-statistic : ', fun_opt(param))
+            print('Initial AD-statistic: ', fun_opt(param1))
+            print('Optimized AD-statistic : ', fun_opt(param))
             print('')
             print('Parameters: ', param)
             if test_gof:
@@ -1596,11 +1780,10 @@ class GLD:
         C = np.sum(S)
         p = S/C
         y1 = y/C
-        if random_state:
-            np.random.seed(random_state)
+        generator = np.random if random_state is None else np.random.RandomState(random_state)
         def gen(p):
             """Auxiliary function for generating random variables."""            
-            a = np.random.rand(1)
+            a = generator.rand(1)
             i = np.nonzero(a<=np.cumsum(p))[0][0]
             return x[i] + 2*(a - np.sum(p[:i]))/(y1[i]+y1[i+1])
         data = np.array([gen(p) for i in range(N_gen)]).ravel()

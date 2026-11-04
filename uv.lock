@@ -1197,6 +1197,15 @@ wheels = [
 ]
 
 [[package]]
+name = "gldpy"
+version = "0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/0f/04efdd5e38322115e4d4df4dfcff2ccfedd2921300f0698640c1e404b1a2/gldpy-0.2.tar.gz", hash = "sha256:e70dc721f66139681b3d36f4e1effaaeea9f46ded88b8d1de92b037ab42485c5", size = 14757, upload-time = "2020-10-27T23:03:04.212Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/61/63/f45b948d10883f1c5814f745cb6624b1a1131efe069563083d40f9dc420d/gldpy-0.2-py3-none-any.whl", hash = "sha256:557453f7982928c408c55174984f22a1c8bd372b5a82cdabf4e48fcdb3eb81fe", size = 16434, upload-time = "2020-10-27T23:03:02.81Z" },
+]
+
+[[package]]
 name = "gldpy-gpu"
 version = "0.3.0"
 source = { editable = "." }
@@ -1220,6 +1229,7 @@ dependencies = [
 dev = [
     { name = "build", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "build", version = "1.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "gldpy" },
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pytest", version = "9.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "twine", version = "6.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
@@ -1237,6 +1247,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "build" },
+    { name = "gldpy", specifier = "==0.2" },
     { name = "pytest", specifier = ">=8" },
     { name = "twine" },
 ]

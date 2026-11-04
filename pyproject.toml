@@ -32,7 +32,7 @@ Homepage = "https://github.com/Kramer84/gldpy-opt"
 Upstream = "https://github.com/alexsandi/gldpy"
 
 [dependency-groups]
-dev = ["pytest>=8", "build", "twine"]
+dev = ["pytest>=8", "build", "twine", "gldpy==0.2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["gldpy_gpu"]
@@ -53,7 +53,8 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -m 'not gpu_speed'"
+addopts = "-ra -m 'not gpu_speed and not slow'"
 markers = [
     "gpu_speed: GPU-vs-CPU speed checks (run with `pytest -m gpu_speed`)",
+    "slow: takes over 10 s, run in CI (run with `pytest -m slow`)",
 ]
